@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-latx.py — Cámara a fullscreen + color DMX basado en el rostro (sin emociones).
-- Toma el ROI del rostro más grande y calcula el color promedio (BGR).
-- Suaviza el color (EMA) para dar sensación de latencia.
-- Rellena el área del rostro en pantalla con ese color.
-- Envía RGB continuo a Universe 0, canales 22–56 (repetición RGB).
-Requisitos:
-  - OpenCV (python3-opencv o wheel 4.10.x)
-  - OLA (ola, ola-python) y ENTTEC parcheado a Universe 0
-Lanza con:
-  QT_QPA_PLATFORM=xcb python3 latx.py --fps 1 --camera 0 --width 800 --height 480 --fullscreen --models ~/.../models
-"""
+# latx.py — Color primario por rostro (pantalla sólida) + DMX 22–56
 
 import os, time, argparse, threading
 from array import array
@@ -19,17 +8,14 @@ import cv2
 import numpy as np
 from ola.ClientWrapper import ClientWrapper
 
-# --- Config DMX ---
 UNIVERSE = 0
 DMX_LOW, DMX_HIGH = 22, 56
 DMX_FPS = 44
 
-def clamp(val, lo, hi): return max(lo, min(hi, val))
+def clamp(v, lo, hi): return max(lo, min(hi, v))
 
-# ---------------- DMX ----------------
-
+# ---------- DMX ----------
 class DMXOut:
-    """Envío continuo a 44 Hz + push inmediato en cada actualización."""
     def __init__(self, universe=UNIVERSE, fps=DMX_FPS):
         self.universe = universe
         self.period = 1.0 / fps
@@ -44,8 +30,7 @@ class DMXOut:
         with self._lock:
             payload = self.dmx
         try:
-            # Enviar array('B') directamente evita el .tobytes del cliente OLA antiguo
-            self.client.SendDmx(self.universe, payload, lambda s: None)
+            self.client.SendDmx(self.universe, payload, lambda s: None)  # array('B') OK
         except Exception:
             pass
 
@@ -69,11 +54,7 @@ class DMXOut:
         while not self._stop.is_set():
             self._send_now()
             next_t += self.period
-            dt = next_t - time.time()
-            if dt > 0:
-                time.sleep(min(dt, self.period))
-            else:
-                next_t = time.time()
+            time.sleep(max(0, next_t - time.time()))
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -88,59 +69,59 @@ class DMXOut:
             self._thread.join(timeout=1.0)
         self.blackout()
 
-# ------------- Detección rostro + color -------------
-
-class FaceColor:
-    """Detecta rostro, calcula color promedio, suaviza (EMA) y mantiene último valor."""
-    def __init__(self, models_dir, ema_alpha=0.25, decay_per_sec=0.15):
+# ---------- Color por rostro ----------
+class FacePrimaryColor:
+    """
+    Calcula color promedio BGR del rostro más grande,
+    lo suaviza (EMA) y lo reduce a un primario (R, G o B).
+    Sin rostro: decae a negro.
+    """
+    def __init__(self, models_dir, ema_alpha=0.25, decay_per_sec=0.25, min_level=32):
         haar = os.path.join(models_dir, 'haarcascade_frontalface_default.xml')
         self.det = cv2.CascadeClassifier(haar)
         if self.det.empty():
             raise RuntimeError('No se pudo cargar haarcascade_frontalface_default.xml')
         self.color_ema = np.array([0.0, 0.0, 0.0], dtype=np.float32)  # BGR
-        self.ema_alpha = float(ema_alpha)
-        self.decay_per_sec = float(decay_per_sec)
+        self.ema_alpha   = float(ema_alpha)
+        self.decay_per_s = float(decay_per_sec)
+        self.min_level   = int(min_level)
         self.last_ts = time.time()
 
     def update_from_frame(self, frame_bgr):
         now = time.time()
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        faces = self.det.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(60,60))
+        faces = self.det.detectMultiScale(gray, 1.05, 3, minSize=(60,60))
 
         if len(faces) > 0:
-            # rostro más grande
             x,y,w,h = max(faces, key=lambda r: r[2]*r[3])
             roi = frame_bgr[y:y+h, x:x+w]
-            # promedio BGR, ignorando extremos muy oscuros (umbral ligero)
             mask = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) > 15
             if mask.any():
                 mean_bgr = roi[mask].reshape(-1,3).mean(axis=0)
             else:
                 mean_bgr = roi.reshape(-1,3).mean(axis=0)
 
-            # suavizado exponencial
+            # EMA
             self.color_ema = (1.0 - self.ema_alpha) * self.color_ema + self.ema_alpha * mean_bgr
-
-            # dibuja el rectángulo de color sobre la cara (overlay)
-            overlay = frame_bgr.copy()
-            b,g,r = [int(clamp(c, 0, 255)) for c in self.color_ema]
-            cv2.rectangle(overlay, (x,y), (x+w, y+h), (b,g,r), thickness=-1)
-            # mezcla (50% del color sobre rostro)
-            cv2.addWeighted(overlay, 0.5, frame_bgr, 0.5, 0, frame_bgr)
-
         else:
-            # sin rostros: decaimos suave a negro (sensación de latencia)
+            # decaimiento a negro
             dt = now - self.last_ts
-            k = clamp(self.decay_per_sec * dt, 0.0, 1.0)
-            self.color_ema = (1.0 - k) * self.color_ema  # tiende a 0
+            k = clamp(self.decay_per_s * dt, 0.0, 1.0)
+            self.color_ema = (1.0 - k) * self.color_ema
 
         self.last_ts = now
-        # devuelve color actual (convertido a RGB para DMX if needed)
-        b,g,r = self.color_ema
-        return (int(r), int(g), int(b))
 
-# ------------- Main -------------------
+        # Convertimos a RGB y reducimos a un primario (dominante)
+        b, g, r = self.color_ema
+        rgb = np.array([r, g, b])
+        if rgb.max() < self.min_level:
+            return (0, 0, 0)
+        dominant = int(np.argmax(rgb))
+        out = [0, 0, 0]
+        out[dominant] = int(clamp(rgb[dominant], 0, 255))
+        return tuple(out)  # (R,G,B)
 
+# ---------- util ----------
 def open_capture(index, width, height, fps):
     cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  width)
@@ -150,10 +131,7 @@ def open_capture(index, width, height, fps):
         raise RuntimeError(f"No se pudo abrir /dev/video{index}")
     return cap
 
-def put_label(img, text, x, y):
-    cv2.putText(img, text, (x+2,y+2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,0), 3, cv2.LINE_AA)
-    cv2.putText(img, text, (x,y),     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2, cv2.LINE_AA)
-
+# ---------- main ----------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--camera", type=int, default=0)
@@ -165,8 +143,7 @@ def main():
     args = ap.parse_args()
 
     cap = open_capture(args.camera, args.width, args.height, args.fps)
-
-    face_col = FaceColor(args.models, ema_alpha=0.25, decay_per_sec=0.20)
+    colorizer = FacePrimaryColor(args.models, ema_alpha=0.22, decay_per_sec=0.28, min_level=28)
 
     dmx = DMXOut(universe=UNIVERSE, fps=DMX_FPS)
     dmx.start()
@@ -186,15 +163,14 @@ def main():
                 next_shot += interval
                 ok, frame = cap.read()
                 if ok:
-                    # procesar color (también pinta overlay del color en la cara)
-                    rgb = face_col.update_from_frame(frame)
-                    # enviar a DMX
+                    rgb = colorizer.update_from_frame(frame)  # (R,G,B)
+
+                    # DMX
                     dmx.set_rgb_color_over_range(DMX_LOW, DMX_HIGH, rgb)
 
-                    # mostrar
-                    disp = cv2.resize(frame, (args.width, args.height))
-                    put_label(disp, f"RGB DMX: {rgb}", 12, 32)
-                    put_label(disp, f"Cam FPS: {args.fps:.2f}", 12, args.height-18)
+                    # Pantalla: color sólido (sin mezclar con cámara)
+                    bgr = (int(rgb[2]), int(rgb[1]), int(rgb[0]))
+                    disp = np.full((args.height, args.width, 3), bgr, dtype=np.uint8)
                     cv2.imshow("Latencia Afectiva", disp)
 
             if (cv2.waitKey(1) & 0xFF) == 27:
