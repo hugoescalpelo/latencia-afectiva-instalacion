@@ -17,7 +17,7 @@ def send_color(r, g, b):
             data[i] = r
             data[i + 1] = g
             data[i + 2] = b
-    client.SendDmx(UNIVERSE, bytes(data), lambda s: None)
+    client.SendDmx(UNIVERSE, data, lambda s: None)
     print(f"DMX → R:{r} G:{g} B:{b}")
 
 try:
