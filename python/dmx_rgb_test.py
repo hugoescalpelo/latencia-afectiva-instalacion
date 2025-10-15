@@ -1,30 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Script de prueba DMX para OLA (Open Lighting Architecture)
-Envía secuencias RGB simples al Universe 0.
-Confirma funcionamiento del dispositivo Enttec OpenDMX (FT232).
-"""
-
 from ola.ClientWrapper import ClientWrapper
 import array
 
-# === CONFIGURACIÓN ===
-UNIVERSE = 0            # Universo que sí funciona (comprobado con ola_dmxconsole)
+# Ajusta estos valores si tu universo activo es otro
+UNIVERSE = 0
 DMX_LOW, DMX_HIGH = 22, 56
-FPS = 40                # Frecuencia de envío (~40 FPS)
-DELAY_MS = 1000         # Cambio de color cada segundo
-SERVER = "127.0.0.1"    # Fuerza conexión local (mismo olad)
-PORT = 9010
+FPS = 40            # ~DMX (40–44 Hz está bien)
+DELAY_MS = 1000     # cambio de color cada 1 s
 
-# === CLIENTE ===
-wrapper = ClientWrapper(server=SERVER, port=PORT)
+# Crea wrapper/cliente con defaults (localhost)
+wrapper = ClientWrapper()
 client = wrapper.Client()
+
+# Buffer DMX como array('B') — requerido por ola-python (tiene .tobytes())
 dmx = array.array('B', [0] * 512)
-colors = [(255,0,0), (0,255,0), (0,0,255), (255,255,255), (0,0,0)]
+
+# Secuencia de colores básicos
+colors = [(255,0,0),(0,255,0),(0,0,255),(255,255,255),(0,0,0)]
 idx = 0
 
 def apply_rgb(r,g,b):
+    """Escribe (r,g,b) en el rango DMX_LOW..DMX_HIGH (formato RGB secuencial)."""
     for i in range(DMX_LOW - 1, DMX_HIGH, 3):
         if i + 2 < len(dmx):
             dmx[i]   = r
