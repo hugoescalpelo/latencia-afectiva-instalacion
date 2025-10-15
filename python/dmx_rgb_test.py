@@ -3,21 +3,20 @@ from ola.ClientWrapper import ClientWrapper
 import time
 
 UNIVERSE = 0
-DMX_LOW, DMX_HIGH = 22, 56   # rango activo
-DELAY = 1.0                  # segundos entre colores
+DMX_LOW, DMX_HIGH = 22, 56
+DELAY = 1.0
 
 wrapper = ClientWrapper()
 client = wrapper.Client()
 
 def send_color(r, g, b):
-    """Envía un color RGB completo al rango DMX especificado."""
     data = bytearray(512)
     for i in range(DMX_LOW - 1, DMX_HIGH, 3):
         if i + 2 < len(data):
             data[i] = r
             data[i + 1] = g
             data[i + 2] = b
-    client.SendDmx(UNIVERSE, data, lambda s: None)
+    client.SendDmx(UNIVERSE, data, lambda s: None)  # ← corregido
     print(f"DMX → R:{r} G:{g} B:{b}")
 
 try:
